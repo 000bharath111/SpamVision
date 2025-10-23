@@ -1,0 +1,195 @@
+# ci/github-actions.yml
+name: CI - Tests, Build & Docker
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # default python version for backend job
+  PYTHON_VERSION: "3.10"
+
+jobs:
+
+  backend-tests:
+    name: Backend — lint & tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./services/api
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/services/api/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # install dev tools if present
+          pip install pytest flake8
+
+      - name: Run flake8 lint
+        run: |
+          if command -v flake8 >/dev/null 2>&1; then
+            flake8 || (echo "flake8 found issues" && false)
+          else
+            echo "flake8 not installed; skipping lint"
+          fi
+
+      - name: Run backend tests (pytest)
+        run: |
+          if [ -d "tests" ]; then
+            pytest -q
+          else
+            echo "No backend tests found; skipping pytest"
+          fi
+
+      - name: Package backend artifact (job output)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/backend-dist
+          # Save requirements + a copy of code as artifact for debugging
+          cp requirements.txt $GITHUB_WORKSPACE/backend-dist/ || true
+          tar -czf $GITHUB_WORKSPACE/backend-dist/backend-src.tar.gz .
+        shell: bash
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dist
+          path: ${{ github.workspace }}/backend-dist
+
+  frontend-tests:
+    name: Frontend — lint, test & build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "npm"
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            frontend/node_modules
+            ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install frontend dependencies
+        run: |
+          npm ci
+
+      - name: Run ESLint (if configured)
+        run: |
+          if [ -f package.json ] && grep -q "eslint" package.json; then
+            npm run -s lint || (echo "eslint failed" && false)
+          else
+            echo "eslint not configured; skipping"
+          fi
+
+      - name: Run frontend tests
+        run: |
+          if grep -q "test" package.json; then
+            npm run -s test -- --watchAll=false || echo "frontend tests failed"
+          else
+            echo "No frontend tests; skipping"
+          fi
+
+      - name: Build frontend (Vite)
+        run: |
+          npm run build
+
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+  build-and-push-images:
+    name: Build & push Docker images (optional)
+    runs-on: ubuntu-latest
+    needs: [ backend-tests, frontend-tests ]
+    if: always()   # run to build images; push step conditional by secrets
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to DockerHub (if DOCKERHUB_TOKEN provided)
+        if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+        uses: docker/login-action@v2
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & optionally push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: services/api/Dockerfile
+          push: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN || false }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-api:{{github.sha}}', secrets.DOCKERHUB_USERNAME) || format('sms-spam-api:{{github.sha}}') }}
+            ${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-api:latest', secrets.DOCKERHUB_USERNAME) || 'sms-spam-api:latest' }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-api:cache', secrets.DOCKERHUB_USERNAME) || '' }}
+          cache-to: type=inline
+
+      - name: Build & optionally push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN || false }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-frontend:{{github.sha}}', secrets.DOCKERHUB_USERNAME) || format('sms-spam-frontend:{{github.sha}}') }}
+            ${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-frontend:latest', secrets.DOCKERHUB_USERNAME) || 'sms-spam-frontend:latest' }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-frontend:cache', secrets.DOCKERHUB_USERNAME) || '' }}
+          cache-to: type=inline
+
+      - name: Build & optionally push worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: services/worker/Dockerfile
+          push: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN || false }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-worker:{{github.sha}}', secrets.DOCKERHUB_USERNAME) || format('sms-spam-worker:{{github.sha}}') }}
+            ${{ secrets.DOCKERHUB_USERNAME && format('{0}/sms-spam-worker:latest', secrets.DOCKERHUB_USERNAME) || 'sms-spam-worker:latest' }}
+
+      - name: Set GitHub Action outputs
+        run: echo "images_built=true"

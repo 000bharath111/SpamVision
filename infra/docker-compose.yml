@@ -1,0 +1,20 @@
+# infra/docker-compose.frontend.yml
+version: "3.8"
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: sms-spam-frontend:local
+    container_name: sms-spam-frontend
+    ports:
+      - "8080:80"          # access at http://localhost:8080
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    networks:
+      - smsnet
+
+networks:
+  smsnet:
+    driver: bridge
