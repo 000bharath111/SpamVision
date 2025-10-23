@@ -2,7 +2,7 @@
 
 **Author:** Bharath R  
 **Version:** 1.0  
-**License:** MIT  
+
 
 **Code Statistics:** ![Python](https://img.shields.io/badge/Python-62.6%25-blue.svg) ![JavaScript](https://img.shields.io/badge/JavaScript-33.9%25-yellow.svg) ![Dockerfile](https://img.shields.io/badge/Dockerfile-3.5%25-blue.svg)
 
@@ -117,6 +117,3 @@ flutter run
 
 ---
 
-## 📜 License
-
-This project is licensed under the [MIT License](LICENSE).
